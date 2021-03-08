@@ -1,4 +1,20 @@
 {
   "dockerImageBuilder": "ritclizup/rit-go-builder",
-  "inputs": []
+  "inputs": [
+    {
+      "label": "Log Level",
+      "name": "pod_log_level",
+      "type": "multiselect",
+      "items": [
+        "info",
+        "error",
+        "panic",
+        "fatal",
+        "warn",
+        "debug"
+      ],
+      "required": true,
+      "tutorial": "Select log level to print"
+    }
+  ]
 }
