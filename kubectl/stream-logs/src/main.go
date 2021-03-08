@@ -5,20 +5,22 @@ package main
 
 import (
 	"formula/pkg/formula"
-	"os"
-	"strconv"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"time"
 )
 
 func main() {
-	input1 := os.Getenv("RIT_INPUT_TEXT")
-	input2 := os.Getenv("RIT_INPUT_LIST")
-	input3, _ := strconv.ParseBool(os.Getenv("RIT_INPUT_BOOLEAN"))
-	input4 := os.Getenv("RIT_INPUT_PASSWORD")
 
 	formula.Formula{
-		Text:     input1,
-		List:     input2,
-		Boolean:  input3,
-		Password: input4,
-	}.Run(os.Stdout)
+		LabelSelector: "app.kubernetes.io/instance in (dennis-runner, dennis-builder-wrapper, dennis-gateway)",
+		SinceTime:     metav1.NewTime(time.Now().Add(-1 * time.Duration(0))),
+		LogLevel: map[string]bool{
+			"info":  true,
+			"error": true,
+			"panic": true,
+			"fatal": true,
+			"warn":  false,
+			"debug": false,
+		},
+	}.Run()
 }

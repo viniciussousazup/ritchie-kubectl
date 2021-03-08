@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/gookit/color"
-	"io"
 	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,25 +16,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
 type Formula struct {
-	Text     string
-	List     string
-	Boolean  bool
-	Password string
+	LabelSelector string
+	SinceTime     metav1.Time
+	LogLevel      map[string]bool
 }
 
-func (f Formula) Run(writer io.Writer) {
-
-	//inputs
-	labelSelector := "app.kubernetes.io/instance=dennis-gateway"
-	previous := false
-	// if 0 see all logs
-	sinceTimeSeconds := 10
-	parseJson := true
+func (f Formula) Run() {
 
 	ctx := context.TODO()
 
@@ -64,81 +54,83 @@ func (f Formula) Run(writer io.Writer) {
 	}
 
 	listOptions := metav1.ListOptions{
-		LabelSelector: labelSelector,
-	}
-	pods, err := clientset.CoreV1().Pods("").List(ctx, listOptions)
-	if err != nil {
-		panic(err)
+		LabelSelector: f.LabelSelector,
 	}
 
-	fmt.Printf("Pods founded:%d\n", len(pods.Items))
+	podsList := make(map[string]v1.Pod, 0)
 
-	wg := sync.WaitGroup{}
-
-	for i, pod := range pods.Items {
-		wg.Add(1)
-		currentPod := pod
-		currentColor := color.FgRed
-		if i%2 == 0 {
-			currentColor = color.FgBlue
+	ticker := time.NewTicker(time.Second)
+	for range ticker.C {
+		pods, err := clientset.CoreV1().Pods("").List(ctx, listOptions)
+		if err != nil {
+			panic(err)
 		}
-		go func() {
-			var sinceTime metav1.Time
-			if sinceTimeSeconds > -1 {
-				sinceTime = metav1.NewTime(time.Now().Add(-1 * time.Duration(sinceTimeSeconds)))
-			}
-			opts := v1.PodLogOptions{
-				Follow:    true,
-				Previous:  previous,
-				SinceTime: &sinceTime,
-			}
-			req := clientset.CoreV1().Pods(currentPod.Namespace).GetLogs(currentPod.Name, &opts)
-			podLogs, err := req.Stream(ctx)
-			if err != nil {
-				panic(err.Error())
-			}
 
-			scanner := bufio.NewScanner(podLogs)
-			scanner.Split(bufio.ScanLines)
-			for scanner.Scan() {
-				m := scanner.Text()
-				if parseJson {
-					err := f.printJson(m, currentColor, currentPod)
-					if err != nil {
-						f.printLine(m, currentColor, currentPod)
-					}
-				} else {
-					f.printLine(m, currentColor, currentPod)
-				}
-
+		for _, pod := range pods.Items {
+			if _, exist := podsList[pod.Name]; exist {
+				continue
 			}
-			wg.Done()
-		}()
+			if pod.Status.Phase == "Running" {
+				println("add pod", pod.Name)
+				podsList[pod.Name] = pod
+				go f.streamLogOfPod(ctx, pod, clientset)
+			}
+		}
+
 	}
 
-	wg.Wait()
 }
 
-func (f Formula) printLine(m string, currentColor color.Color, currentPod v1.Pod) {
-	msgWithColor := currentColor.Render(m)
-	fmt.Printf("[%s]: %s\n", currentPod.Name, msgWithColor)
+func (f Formula) streamLogOfPod(
+	ctx context.Context,
+	pod v1.Pod,
+	clientset *kubernetes.Clientset,
+) {
+	opts := v1.PodLogOptions{
+		Follow:    true,
+		SinceTime: &f.SinceTime,
+	}
+	req := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &opts)
+	podLogs, err := req.Stream(ctx)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	scanner := bufio.NewScanner(podLogs)
+	scanner.Split(bufio.ScanLines)
+	for scanner.Scan() {
+		msg := scanner.Text()
+		err := f.printJson(msg, pod)
+		if err != nil {
+			f.printLine(msg, pod)
+		}
+	}
 }
 
-func (f Formula) printJson(m string, currentColor color.Color, currentPod v1.Pod) error {
+func (f Formula) printLine(msg string, pod v1.Pod) {
+	fmt.Printf("[%s]: %s\n", pod.Name, msg)
+}
+
+func (f Formula) printJson(msg string, pod v1.Pod) error {
 	jsonLine := make(map[string]interface{})
-	err := json.Unmarshal([]byte(m), &jsonLine)
+	err := json.Unmarshal([]byte(msg), &jsonLine)
 	if err != nil {
 		return err
 	}
 
-	podName := currentColor.Render(currentPod.Name)
-	colorOfMsg := getLevelColor(fmt.Sprintf("%s", jsonLine["level"]))
+	level := fmt.Sprintf("%s", jsonLine["level"])
+	if printLevel, exist := f.LogLevel[level]; !exist || !printLevel {
+		return nil
+	}
+
+	podName := pod.Name
+	colorOfMsg := getLevelColor(level)
 	logTime := "-"
 	if value, ok := jsonLine["time"].(int64); ok {
-		logTime = fmt.Sprintf("%d", value)
+		logTime = fmt.Sprintf("%s", time.Unix(value, 0).Format("2 Jan 2006 15:04:05"))
 	}
-	msg := fmt.Sprintf("[%s][%s]", logTime, jsonLine["message"])
-	fmt.Printf("(%s) - %s\n", podName, colorOfMsg.Render(msg))
+	jsonMsg := fmt.Sprintf("[%s][%s]", logTime, jsonLine["message"])
+	fmt.Printf("(%s) - %s\n", podName, colorOfMsg.Render(jsonMsg))
 	return nil
 }
 
@@ -154,7 +146,9 @@ func getLevelColor(level string) color.Color {
 		return color.FgRed
 	case "warn":
 		return color.FgYellow
+	case "debug":
+		return color.FgGray
 	default:
-		return color.FgBlack
+		return color.FgWhite
 	}
 }
